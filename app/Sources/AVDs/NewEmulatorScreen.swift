@@ -43,24 +43,31 @@ struct NewEmulatorScreen: View {
     /// Images follow the selected device: a watch needs a Wear OS image, a phone a phone image.
     private var imageCategory: DeviceCategory { device?.category ?? .phone }
 
-    private var installedImages: [SystemImage] { SystemImage.installed(for: imageCategory) }
+/// The images for the selected device and the one picked. `body` works them out once and hands
+    /// them on: the picker reads its selection once per item, and the downloadable list has
+    /// hundreds of entries, so working them out on every read stalled the screen for most of a second.
+    private struct Images {
+        let installed: [SystemImage]
+        /// The newest images per tag that aren't installed yet.
+        let download: [SystemImage]
+        let selected: SystemImage?
+    }
 
-    /// The newest images per tag that aren't installed yet.
-    private var downloadImages: [SystemImage] {
-        let installed = Set(installedImages.map(\.package))
-        return (model.downloadable ?? [])
-            .filter { imageCategory.accepts(imageTag: $0.tag) && !installed.contains($0.package) }
+    private func images(for category: DeviceCategory) -> Images {
+        let installed = SystemImage.installed(for: category)
+        let installedPackages = Set(installed.map(\.package))
+        let download = (model.downloadable ?? [])
+            .filter { category.accepts(imageTag: $0.tag) && !installedPackages.contains($0.package) }
             .sorted(by: SystemImage.newestFirst)
             .prefix(12)
             .map { $0 }
-    }
-
-    private var image: SystemImage? {
-        let all = installedImages + downloadImages
-        return all.first { $0.package == imagePackage } ?? installedImages.first ?? downloadImages.first
+        let all = installed + download
+        let selected = all.first { $0.package == imagePackage } ?? installed.first ?? download.first
+        return Images(installed: installed, download: download, selected: selected)
     }
 
     var body: some View {
+        let images = images(for: imageCategory)
         VStack(alignment: .leading, spacing: 12) {
             header
             VStack(alignment: .leading, spacing: 8) {
@@ -69,8 +76,8 @@ struct NewEmulatorScreen: View {
             }
             deviceList
             VStack(alignment: .leading, spacing: 10) {
-                imagePicker
-                nameAndCreate
+                imagePicker(images)
+                nameAndCreate(images.selected)
             }
             .padding(14)
             .glassEffect(.regular, in: .rect(cornerRadius: 18))
@@ -101,7 +108,7 @@ struct NewEmulatorScreen: View {
     }
 
     private func create() {
-        guard let device, let image, model.creating == nil else { return }
+        guard let device, let image = images(for: imageCategory).selected, model.creating == nil else { return }
         let chosen = name
         name = ""
         Task { await model.create(device, image: image, name: chosen) }
@@ -268,7 +275,8 @@ struct NewEmulatorScreen: View {
     }
 
     @ViewBuilder
-    private var imagePicker: some View {
+    private func imagePicker(_ images: Images) -> some View {
+        let image = images.selected
         HStack(spacing: 6) {
             Picker("System image", selection: Binding(
                 get: { image?.package ?? "" },
@@ -278,16 +286,16 @@ struct NewEmulatorScreen: View {
                     Text(model.downloadable == nil && model.imagesError == nil
                          ? "Loading images…" : "No \(imageCategory.rawValue) images").tag("")
                 }
-                if !installedImages.isEmpty {
+                if !images.installed.isEmpty {
                     Section("Installed") {
-                        ForEach(installedImages, id: \.package) { i in
+                        ForEach(images.installed, id: \.package) { i in
                             Text(i.label).tag(i.package)
                         }
                     }
                 }
-                if !downloadImages.isEmpty {
+                if !images.download.isEmpty {
                     Section("Download") {
-                        ForEach(downloadImages, id: \.package) { i in
+                        ForEach(images.download, id: \.package) { i in
                             Label(i.label, systemImage: "arrow.down.circle").tag(i.package)
                         }
                     }
@@ -319,7 +327,7 @@ struct NewEmulatorScreen: View {
         }
     }
 
-    private var nameAndCreate: some View {
+    private func nameAndCreate(_ image: SystemImage?) -> some View {
         HStack(spacing: 8) {
             TextField(device.flatMap { d in image.map { AVDManager.defaultName(d, $0) } } ?? "Name", text: $name)
                 .textFieldStyle(.plain)
