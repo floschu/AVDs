@@ -141,6 +141,7 @@ struct MenuView: View {
             .buttonStyle(.glass)
             .buttonBorderShape(.circle)
             .tooltip("New emulator")
+            .accessibilityLabel("New emulator")
         }
         .padding(.leading, 4)
     }

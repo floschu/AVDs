@@ -5,7 +5,7 @@
 <br>
 <br>
 
-<p align="center"><img alt="AVDs menu bar panel: launching an emulator, mirroring a device, then the New Emulator screen filtered to foldables" width="380" src="app/Resources/demo.png"></p>
+<p align="center"><img alt="AVDs launches an emulator from the menu bar, mirrors a connected phone, then opens the New Emulator screen filtered to foldables" width="640" src="app/Resources/demo.webp"></p>
 
 ## Install
 
@@ -26,7 +26,7 @@ macOS asks whether AVDs may find devices on your local network. That's adb looki
 ```
 scripts/build.sh            # builds app/build/AVDs.app
 scripts/build.sh --install  # also copies it to /Applications and restarts it
-scripts/record-demo.sh      # re-records the animation above with sample data, after UI changes
+scripts/record-demo.sh      # re-records the animation above, and an MP4 for posts, after UI changes
 ```
 
 ## Release

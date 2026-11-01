@@ -1,61 +1,150 @@
-// Records the README demo. scripts/record-demo.sh compiles and runs this. Don't run it by hand.
+// Records the demo. scripts/record-demo.sh compiles and runs this. Don't run it by hand.
 //
-// Usage: record-demo <pid of AVDs in demo mode> <frames folder>
-// Captures only the panel window, with a transparent background, as numbered PNGs at `fps`.
-// Prints "FPS <n>" and "CROP <width> <height>" (in points) when done.
+// Usage:
+//   record-demo measure
+//     Prints "EMULATOR <width> <height>", the size of the running emulator's windows in points.
+//   record-demo <pid of AVDs> <main .mov> <bar .mov> <AVD folder> <AVD display name> <emulator width> <emulator height>
+//     Records a fixed area around the menu bar icon: the panel, the emulator window and, if a
+//     phone is connected, its scrcpy window, over the wallpaper. Nothing else, not even the menu
+//     bar. A second recording holds the menu bar from the app's icon to the clock.
+//     record-demo.sh lays it over the first, without the items of other apps between the icon
+//     and Apple's items. Prints "AREA <x> <y> <width> <height>", "BAR <x> <y>" relative to the
+//     area, and "HIDE <from> <to>", the part of the bar to leave out, in points.
+//     It ends the way it starts, with the panel closed and no windows, so the video loops.
 //
-// It clicks at positions relative to the panel. When the panel layout changes, update `Spot`.
+// It finds controls by their accessibility labels, so it doesn't depend on the order of the rows.
 import AppKit
 import ApplicationServices
 import ScreenCaptureKit
-import UniformTypeIdentifiers
 
-let args = CommandLine.arguments
-guard args.count == 3, let pid = pid_t(args[1]) else {
-    fputs("usage: record-demo <pid> <frames folder>\n", stderr)
-    exit(2)
-}
-let framesFolder = URL(fileURLWithPath: args[2])
-let fps = 15.0
-
-func fail(_ message: String) -> Never {
+@Sendable func fail(_ message: String) -> Never {
     fputs("error: \(message)\n", stderr)
     exit(1)
 }
 
-/// Keeps the run loop going while waiting, so AppKit and the capture task keep working.
+/// Keeps the run loop going while waiting, so AppKit and the capture keep working.
 func wait(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
-/// Positions inside the panel, from its top left corner, in points.
-enum Spot {
-    static let plus = CGPoint(x: 355, y: 22)
-    static let back = CGPoint(x: 25, y: 22)
-    static let search = CGPoint(x: 70, y: 59)
-    static func formFactor(_ index: Int) -> CGPoint { CGPoint(x: 174 + Double(index) * 30, y: 59) }
-    /// The button on the right of a list row. Rows start at y 72 and are 68 points apart.
-    static func rowButton(_ row: Int) -> CGPoint { CGPoint(x: 300, y: 72 + Double(row) * 68) }
+/// Waits until `condition` returns something, up to `timeout` seconds.
+func waitFor<T>(_ timeout: Double, _ condition: () -> T?) -> T? {
+    let end = Date().addingTimeInterval(timeout)
+    while Date() < end {
+        if let value = condition() { return value }
+        wait(0.02)
+    }
+    return nil
 }
 
-// MARK: Finding things on screen
+final class ResultBox<T>: @unchecked Sendable {
+    let lock = NSLock()
+    var result: Result<T, Error>?
+}
 
-/// The menu bar item of the app, through the accessibility API. CGWindowList doesn't list it.
-func statusItemCenter() -> CGPoint {
-    let app = AXUIElementCreateApplication(pid)
-    var extras: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &extras) == .success,
-          let bar = extras else { fail("can't find the menu bar item. Does the terminal have Accessibility access?") }
-    var children: CFTypeRef?
-    AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &children)
-    guard let item = (children as? [AXUIElement])?.first else { fail("the app has no menu bar item") }
-    var position: CFTypeRef?
-    var size: CFTypeRef?
-    AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &position)
-    AXUIElementCopyAttributeValue(item, kAXSizeAttribute as CFString, &size)
+/// Runs async work while the main run loop keeps going.
+func run<T>(_ work: @escaping @Sendable () async throws -> T) -> T {
+    let box = ResultBox<T>()
+    Task.detached {
+        let result: Result<T, Error>
+        do { result = .success(try await work()) } catch { result = .failure(error) }
+        box.lock.withLock { box.result = result }
+    }
+    while true {
+        if let result = box.lock.withLock({ box.result }) {
+            switch result {
+            case .success(let value): return value
+            case .failure(let error): fail("capture failed: \(error.localizedDescription)")
+            }
+        }
+        wait(0.02)
+    }
+}
+
+/// Windows of other processes whose name starts with `owner`, like "qemu-system" or "scrcpy".
+func windows(of owner: String) -> [(pid: pid_t, bounds: CGRect)] {
+    let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    return list.compactMap { window in
+        guard (window["kCGWindowOwnerName"] as? String)?.hasPrefix(owner) == true,
+              let ownerPID = window["kCGWindowOwnerPID"] as? pid_t,
+              let bounds = window["kCGWindowBounds"] as? [String: Double],
+              bounds["Width"]! > 20, (window["kCGWindowLayer"] as? Int) == 0 else { return nil }
+        return (ownerPID, CGRect(x: bounds["X"]!, y: bounds["Y"]!, width: bounds["Width"]!, height: bounds["Height"]!))
+    }
+}
+
+let args = CommandLine.arguments
+if args.count == 2, args[1] == "measure" {
+    let all = windows(of: "qemu-system").map(\.bounds)
+    guard let first = all.first else { fail("no emulator window") }
+    let union = all.dropFirst().reduce(first) { $0.union($1) }
+    print("EMULATOR \(Int(union.width)) \(Int(union.height))")
+    exit(0)
+}
+guard args.count == 8, let pid = pid_t(args[1]), let emulatorWidth = Double(args[6]),
+      let emulatorHeight = Double(args[7]) else {
+    fputs("usage: record-demo measure | record-demo <pid> <main .mov> <icon .mov> <AVD folder> <AVD name> <width> <height>\n", stderr)
+    exit(2)
+}
+let mainOutput = URL(fileURLWithPath: args[2])
+let barOutput = URL(fileURLWithPath: args[3])
+let avdFolder = URL(fileURLWithPath: args[4])
+let avdName = args[5]
+let emulatorSize = CGSize(width: emulatorWidth, height: emulatorHeight)
+
+/// The recorded area in points, 4:3.
+let area = CGSize(width: 1280, height: 960)
+let gap = 40.0
+
+// MARK: Accessibility
+
+func attribute<T>(_ element: AXUIElement, _ name: String) -> T? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+    return value as? T
+}
+
+func frame(_ element: AXUIElement) -> CGRect? {
+    guard let position: AXValue = attribute(element, kAXPositionAttribute),
+          let size: AXValue = attribute(element, kAXSizeAttribute) else { return nil }
     var origin = CGPoint.zero
     var extent = CGSize.zero
-    AXValueGetValue(position as! AXValue, .cgPoint, &origin)
-    AXValueGetValue(size as! AXValue, .cgSize, &extent)
-    return CGPoint(x: origin.x + extent.width / 2, y: origin.y + extent.height / 2)
+    AXValueGetValue(position, .cgPoint, &origin)
+    AXValueGetValue(size, .cgSize, &extent)
+    return CGRect(origin: origin, size: extent)
+}
+
+/// The first element below `root` that matches, depth first.
+func find(_ root: AXUIElement, depth: Int = 0, _ matches: (AXUIElement) -> Bool) -> AXUIElement? {
+    if matches(root) { return root }
+    guard depth < 30, let children: [AXUIElement] = attribute(root, kAXChildrenAttribute) else { return nil }
+    for child in children {
+        if let found = find(child, depth: depth + 1, matches) { return found }
+    }
+    return nil
+}
+
+let appElement = AXUIElementCreateApplication(pid)
+
+/// A control in the panel by its accessibility label, like "Launch Pixel 10".
+func control(_ label: (String) -> Bool) -> AXUIElement? {
+    guard let windows: [AXUIElement] = attribute(appElement, kAXWindowsAttribute) else { return nil }
+    for window in windows {
+        if let found = find(window, { element in
+            guard let description: String = attribute(element, kAXDescriptionAttribute) else { return false }
+            return label(description)
+        }) { return found }
+    }
+    return nil
+}
+
+func control(_ label: String) -> AXUIElement? { control { $0 == label } }
+
+/// The app's menu bar item. CGWindowList doesn't list it.
+func statusItemFrame() -> CGRect {
+    guard let bar: AXUIElement = attribute(appElement, "AXExtrasMenuBar"),
+          let item = (attribute(bar, kAXChildrenAttribute) as [AXUIElement]?)?.first,
+          let box = frame(item)
+    else { fail("can't find the menu bar item. Does the terminal have Accessibility access?") }
+    return box
 }
 
 /// The panel's frame in screen points, top left origin. Nil while it's closed.
@@ -69,24 +158,15 @@ func panelFrame() -> CGRect? {
     return nil
 }
 
-func panel() -> CGRect {
-    guard let frame = panelFrame() else { fail("the panel closed unexpectedly, stopping before a click lands elsewhere") }
-    return frame
-}
-
-func inPanel(_ spot: CGPoint) -> CGPoint {
-    let frame = panel()
-    return CGPoint(x: frame.minX + spot.x, y: frame.minY + spot.y)
-}
-
 // MARK: Input
 
 func post(_ type: CGEventType, _ point: CGPoint) {
-    CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+    CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
+        .post(tap: .cghidEventTap)
 }
 
-/// Glides the pointer, so the GIF shows where it goes.
-func move(to target: CGPoint, duration: Double = 0.35) {
+/// Glides the pointer, so the video shows where it goes.
+func move(to target: CGPoint, duration: Double = 0.45) {
     let start = CGEvent(source: nil)?.location ?? target
     let steps = max(Int(duration * 60), 1)
     for i in 1...steps {
@@ -100,15 +180,21 @@ func move(to target: CGPoint, duration: Double = 0.35) {
 
 func click(_ point: CGPoint) {
     move(to: point)
-    wait(0.15)
+    wait(0.2)
     post(.leftMouseDown, point)
-    wait(0.05)
+    wait(0.06)
     post(.leftMouseUp, point)
 }
 
-func clickInPanel(_ spot: CGPoint) { click(inPanel(spot)) }
+/// Clicks a control in the open panel. Stops if the panel closed, so no click lands elsewhere.
+func click(_ element: AXUIElement) {
+    guard panelFrame() != nil, let box = frame(element) else {
+        fail("the panel closed unexpectedly, stopping before a click lands elsewhere")
+    }
+    click(CGPoint(x: box.midX, y: box.midY))
+}
 
-/// Presses one key, like 125 for Down or 36 for Return.
+/// Presses one key, like 125 for Down or 53 for Escape.
 func press(_ key: CGKeyCode) {
     for down in [true, false] {
         CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: down)?.post(tap: .cghidEventTap)
@@ -124,114 +210,224 @@ func type(_ text: String) {
             event?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
             event?.post(tap: .cghidEventTap)
         }
-        wait(0.12)
+        wait(0.14)
     }
 }
 
-func togglePanel() {
-    let wasOpen = panelFrame() != nil
-    click(statusItemCenter())
-    for _ in 0..<40 where (panelFrame() != nil) == wasOpen { wait(0.05) }
+func openPanel() {
+    guard panelFrame() == nil else { return }
+    let item = statusItemFrame()
+    click(CGPoint(x: item.midX, y: item.midY))
+    guard waitFor(3, { panelFrame() }) != nil else { fail("the panel didn't open") }
     wait(0.5)
+}
+
+func closePanel() {
+    guard panelFrame() != nil else { return }
+    let item = statusItemFrame()
+    click(CGPoint(x: item.midX, y: item.midY))
+    _ = waitFor(3, { panelFrame() == nil ? true : nil })
 }
 
 // MARK: Capture
 
-/// Captures the panel window into numbered PNGs until stopped. Only the window: everything
-/// around it stays transparent. The canvas is as tall as the tallest screen, top aligned.
-final class Recorder: @unchecked Sendable {
+final class Finished: NSObject, SCRecordingOutputDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    private var running = true
-    private(set) var frames = 0
-
-    func stop() { lock.withLock { running = false } }
-    private var isRunning: Bool { lock.withLock { running } }
-
-    func start(pid: pid_t, size: CGSize, folder: URL, fps: Double) async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let window = content.windows.first(where: {
-            $0.owningApplication?.processID == pid && $0.frame.width >= 300
-        }) else { fail("can't find the panel window to capture. Does the terminal have Screen Recording access?") }
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let config = SCStreamConfiguration()
-        let scale = Double(filter.pointPixelScale)
-        config.width = Int(size.width * scale)
-        config.height = Int(size.height * scale)
-        config.scalesToFit = false
-        config.showsCursor = true
-        config.ignoreShadowsSingleWindow = true
-        let start = Date()
-        while isRunning {
-            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-            let url = folder.appendingPathComponent(String(format: "frame%05d.png", frames))
-            if let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) {
-                CGImageDestinationAddImage(destination, image, nil)
-                CGImageDestinationFinalize(destination)
-            }
-            frames += 1
-            // Fixed frame times, so the animation plays at real speed.
-            let next = start.addingTimeInterval(Double(frames) / fps)
-            let delay = next.timeIntervalSinceNow
-            if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
-        }
+    private var done = false
+    var isDone: Bool { lock.withLock { done } }
+    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) { lock.withLock { done = true } }
+    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: any Error) {
+        fail("recording failed: \(error.localizedDescription)")
     }
+}
+
+/// The main display and the apps whose windows the main recording shows: AVDs, the wallpaper,
+/// and the processes in `pids`, like the emulator and scrcpy once they run.
+/// The filter only covers windows that exist when it's made. Off-screen windows count too, so it
+/// includes the closed panel, which the layout step opened once.
+@Sendable func mainFilter(pids: Set<pid_t>) async throws -> SCContentFilter {
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+    guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) else {
+        fail("can't find the main display. Does the terminal have Screen Recording access?")
+    }
+    let apps = content.applications.filter {
+        pids.contains($0.processID) || $0.bundleIdentifier == "com.apple.WindowManager" // draws the wallpaper
+    }
+    return SCContentFilter(display: display, including: apps, exceptingWindows: [])
+}
+
+/// Everything on the main display, for the menu bar.
+@Sendable func fullFilter() async throws -> SCContentFilter {
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) else {
+        fail("can't find the main display")
+    }
+    return SCContentFilter(display: display, excludingWindows: [])
+}
+
+@Sendable func record(_ rect: CGRect, filter: SCContentFilter, to url: URL, delegate: Finished) async throws -> SCStream {
+    try? FileManager.default.removeItem(at: url)
+    let config = SCStreamConfiguration()
+    let scale = Double(filter.pointPixelScale)
+    config.sourceRect = rect
+    config.width = Int(rect.width * scale)
+    config.height = Int(rect.height * scale)
+    config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+    config.showsCursor = true
+    config.queueDepth = 8
+    let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+    let recordingConfig = SCRecordingOutputConfiguration()
+    recordingConfig.outputURL = url
+    recordingConfig.outputFileType = .mov
+    recordingConfig.videoCodecType = .h264
+    try stream.addRecordingOutput(SCRecordingOutput(configuration: recordingConfig, delegate: delegate))
+    try await stream.startCapture()
+    return stream
+}
+
+// MARK: Layout
+
+NSApplication.shared.setActivationPolicy(.accessory)
+
+openPanel()
+let panel = panelFrame()!
+guard control("Launch \(avdName)") != nil else { fail("can't find the Launch button of \(avdName)") }
+let hasPhone = control { $0.hasPrefix("Mirror ") } != nil
+closePanel()
+
+// The area hangs from the top of the screen, with the panel near its right edge. Near the right
+// edge of the screen it goes all the way, so the clock shows in full.
+let screen = CGDisplayBounds(CGMainDisplayID())
+let areaRight = screen.maxX - panel.maxX < 240 ? screen.maxX : panel.maxX + 60
+let areaX = max(screen.minX, areaRight - area.width)
+let rect = CGRect(x: areaX, y: screen.minY, width: area.width, height: area.height)
+let item = statusItemFrame()
+
+/// Apple's menu bar items right of the app's icon. Items of other apps between the two get
+/// left out of the video.
+func appleItems() -> [CGRect] {
+    var frames: [CGRect] = []
+    for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier?.hasPrefix("com.apple.") == true {
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        guard let bar: AXUIElement = attribute(element, "AXExtrasMenuBar"),
+              let items: [AXUIElement] = attribute(bar, kAXChildrenAttribute) else { continue }
+        frames += items.compactMap { frame($0) }.filter { $0.minX > item.maxX }
+    }
+    return frames
+}
+let apple = appleItems()
+let appleStart = apple.map(\.minX).min() ?? item.maxX
+// The menu bar from the app's icon to the clock, in even pixels for H.264. It stops there, so the
+// screen recording indicator right of the clock stays out.
+let barX = ((item.minX - 4) / 2).rounded(.down) * 2
+let barEnd = min(rect.maxX, (apple.map(\.maxX).max() ?? item.maxX) + 4)
+let barRect = CGRect(x: barX, y: screen.minY, width: ((barEnd - barX) / 2).rounded(.down) * 2,
+                     height: ((item.maxY - screen.minY + 2) / 2).rounded(.up) * 2)
+let hide = appleStart - item.maxX > 8 ? (from: item.maxX + 2 - barX, to: appleStart - 2 - barX) : (from: 0.0, to: 0.0)
+
+// The emulator window opens left of the panel. It reads its position from emulator-user.ini
+// and writes it back when it exits, so set it right before the launch. record-demo.sh set the scale.
+let emulatorOrigin = CGPoint(x: panel.minX - gap - emulatorSize.width, y: panel.minY + 12)
+let userIni = avdFolder.appendingPathComponent("emulator-user.ini")
+let ini = ((try? String(contentsOf: userIni, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    .filter { !$0.hasPrefix("window.x") && !$0.hasPrefix("window.y") }
+    + ["window.x = \(Int(emulatorOrigin.x))", "window.y = \(Int(emulatorOrigin.y))"]
+try (ini.joined(separator: "\n") + "\n").write(to: userIni, atomically: true, encoding: .utf8)
+
+/// Moves and sizes the scrcpy window left of the emulator, as tall as the emulator.
+func placeMirror(pid mirrorPID: pid_t) {
+    let app = AXUIElementCreateApplication(mirrorPID)
+    guard let window = (attribute(app, kAXWindowsAttribute) as [AXUIElement]?)?.first,
+          let current = frame(window) else { return }
+    let height = emulatorSize.height
+    var size = CGSize(width: (height * current.width / current.height).rounded(), height: height.rounded())
+    var origin = CGPoint(x: emulatorOrigin.x - gap - size.width, y: emulatorOrigin.y)
+    AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, AXValueCreate(.cgPoint, &origin)!)
+    AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, AXValueCreate(.cgSize, &size)!)
 }
 
 // MARK: Run
 
-NSApplication.shared.setActivationPolicy(.accessory)
-try? FileManager.default.removeItem(at: framesFolder)
-try FileManager.default.createDirectory(at: framesFolder, withIntermediateDirectories: true)
-
-// Measure both screens first, so the canvas fits the taller one. The list gets one more row
-// during the recording.
-if panelFrame() == nil { togglePanel() }
-let listHeight = panel().height + 68
-clickInPanel(Spot.plus)
-wait(1)
-// The capture scales the window down whenever it's bigger than the canvas, and the window grows
-// past its final size for a moment while the screens switch. So the canvas gets plenty of room.
-// record-demo.sh crops the frames to the size printed as CROP.
-let crop = CGSize(width: panel().width, height: max(panel().height, listHeight) + 12)
-let canvas = CGSize(width: crop.width + 200, height: crop.height + 300)
-clickInPanel(Spot.back)
-wait(1)
-
-// Start with the pointer in the middle of the panel.
-move(to: CGPoint(x: panel().midX, y: panel().midY), duration: 0.5)
-wait(0.3)
-
-let recorder = Recorder()
-let recording = Task.detached {
-    do { try await recorder.start(pid: pid, size: canvas, folder: framesFolder, fps: fps) } catch { fail("capture failed: \(error.localizedDescription)") }
+let restingSpot = CGPoint(x: rect.midX - 160, y: rect.midY + 120)
+move(to: restingSpot, duration: 0.6)
+var shown: Set<pid_t> = [pid]
+let barDone = Finished()
+let mainDone = Finished()
+let barStream = run { try await record(barRect, filter: try await fullFilter(), to: barOutput, delegate: barDone) }
+let mainStream = run { [shown] in
+    try await record(rect, filter: try await mainFilter(pids: shown), to: mainOutput, delegate: mainDone)
 }
-wait(1.2)
-clickInPanel(Spot.rowButton(1))      // Launch Pixel 10, boots for 2 s in demo mode
-wait(2.8)
-clickInPanel(Spot.rowButton(0))      // Mirror the Pixel 9 Pro
-wait(1.2)
-clickInPanel(Spot.plus)              // New Emulator
+
+/// Adds a process's windows to the main recording.
+func show(_ newPID: pid_t) {
+    shown.insert(newPID)
+    run { [shown] in try await mainStream.updateContentFilter(try await mainFilter(pids: shown)) }
+}
+
+wait(0.8)
+openPanel()
+wait(0.6)
+click(control("Launch \(avdName)")!)
+// Quick boot takes a few seconds. The panel closes when the emulator window comes up.
+guard let emulatorPID = waitFor(30, { windows(of: "qemu-system").first?.pid }) else {
+    fail("the emulator window didn't appear")
+}
+show(emulatorPID)
+move(to: restingSpot, duration: 0.8)
+_ = waitFor(30) { control("Stop \(avdName)") }
+wait(2.5)
+
+var mirrorPID: pid_t?
+if hasPhone {
+    openPanel()
+    wait(0.5)
+    if let mirror = control({ $0.hasPrefix("Mirror ") }) {
+        click(mirror)
+        // Placed before it shows up in the recording, so it doesn't jump.
+        mirrorPID = waitFor(15) { windows(of: "scrcpy").first?.pid }
+        if let mirrorPID {
+            placeMirror(pid: mirrorPID)
+            wait(0.1)
+            show(mirrorPID)
+        }
+        wait(2.5)
+    }
+}
+
+// The New Emulator screen, filtered to foldables.
+openPanel()
+wait(0.5)
+guard let newEmulator = control("New emulator") else { fail("can't find the New emulator button") }
+click(newEmulator)
 wait(1.4)
-clickInPanel(Spot.formFactor(1))     // add Tablet to the default Phone
-wait(1.1)
-clickInPanel(Spot.search)
 type("fold")
 wait(1.2)
-press(125)                           // Down picks the next foldable
+press(125) // Down picks the next device
 wait(0.8)
-press(36)                            // Return moves to the name
-wait(0.6)
-press(36)                            // Return creates it, 1 s in demo mode
-wait(2.4)
-clickInPanel(Spot.rowButton(0))      // stop mirroring
-wait(0.6)
-clickInPanel(Spot.rowButton(1))      // stop Pixel 10, 1 s in demo mode
+press(125)
 wait(1.6)
-move(to: CGPoint(x: panel().midX, y: panel().midY), duration: 0.5)
-wait(0.6)
 
-recorder.stop()
-wait(0.3) // let the last capture finish writing
-togglePanel() // close
-print(String(format: "FPS %.0f", fps))
-print("CROP \(Int(crop.width)) \(Int(crop.height))")
+// Back to how it started, so the video loops: stop everything and close the panel.
+press(53) // Escape goes back to the list
+wait(0.8)
+if let mirrorPID, let stopMirror = control({ $0.hasPrefix("Stop mirroring ") }) {
+    click(stopMirror)
+    _ = waitFor(10) { windows(of: "scrcpy").contains { $0.pid == mirrorPID } ? nil : true }
+    wait(0.6)
+}
+openPanel()
+guard let stop = control("Stop \(avdName)") else { fail("can't find the Stop button of \(avdName)") }
+click(stop)
+_ = waitFor(30) { windows(of: "qemu-system").isEmpty ? true : nil }
+wait(0.6)
+closePanel()
+move(to: restingSpot, duration: 0.8)
+wait(0.8)
+
+run { try await mainStream.stopCapture() }
+run { try await barStream.stopCapture() }
+guard waitFor(10, { mainDone.isDone && barDone.isDone ? true : nil }) != nil else { fail("the recording didn't finish") }
+if let mirrorPID { kill(mirrorPID, SIGTERM) }
+print("AREA \(Int(rect.minX)) \(Int(rect.minY)) \(Int(rect.width)) \(Int(rect.height))")
+print("BAR \(Int(barRect.minX - rect.minX)) \(Int(barRect.minY - rect.minY))")
+print("HIDE \(Int(hide.from)) \(Int(hide.to))")

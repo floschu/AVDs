@@ -20,9 +20,9 @@ The top level holds only `app/`, `scripts/`, `README.md`, `LICENSE`, `AGENTS.md`
   - `RowMenu.swift`: the items of a row's "…" menu and its right-click menu. SwiftUI's `.contextMenu` doesn't open in the menu bar panel, so right clicks on rows go through an AppKit event monitor.
   - `Demo.swift`: demo mode with sample data, see below.
   - `Requirements.swift`: which tools are missing and how to install them. The panel shows them in a tile.
-- `app/Resources/`: `Info.plist`, the Icon Composer icon `AVDs.icon`, the menu bar template images, the FLOSCH logo, `demo.png`, the animated PNG in the README, and `readme-icon.png`, the rendered app icon for the README. `build.sh` copies only the files it names into the app.
+- `app/Resources/`: `Info.plist`, the Icon Composer icon `AVDs.icon`, the menu bar template images, the FLOSCH logo, `demo.webp`, the animation in the README, and `readme-icon.png`, the rendered app icon for the README. `build.sh` copies only the files it names into the app.
 - `scripts/build.sh` builds `app/build/AVDs.app`. `scripts/release.sh <version name>` releases. See the README.
-- `scripts/record-demo.sh` records `app/Resources/demo.png`. `scripts/record-demo.swift` is its helper and does the clicking and capturing.
+- `scripts/record-demo.sh` records `app/Resources/demo.webp` for the README and `app/build/avds-demo.mp4` for posts. `scripts/record-demo.swift` is its helper and does the clicking and capturing.
 
 ## Build and check
 
@@ -32,9 +32,11 @@ To see a change, restart the app. A rebuild doesn't affect the running instance.
 
 `AVDS_DEMO=1` shows fixed sample devices and never runs adb, the android CLI, avdmanager or scrcpy. Launch, Stop and Mirror only change the sample state. Its settings live in their own defaults domain. Every new code path that runs a tool needs a `Demo.isOn` check, or demo mode could change the user's real emulators.
 
-`scripts/record-demo.sh` re-records the README animation in demo mode. Run it when the UI changes, not for every release. It takes over mouse and keyboard for about 30 seconds and puts the user's running AVDs back afterwards. It clicks at fixed positions inside the panel, listed in `Spot` in `record-demo.swift`. Update them when the layout moves.
+`scripts/record-demo.sh` re-records the README animation and the MP4. Run it when the UI changes, not for every release. It runs in real mode, not demo mode, so the emulator really boots. It creates a throwaway AVD `Pixel_10`, boots it once so Launch quick-boots it on camera, and deletes it at the end. It stops if an AVD with that name exists. After that boot it takes over mouse and keyboard for about 20 seconds and puts the user's running AVDs back afterwards. A connected phone gets mirrored, so ask the user to unlock it first. The user's own AVDs show in the panel.
 
-The recording captures only the panel window through ScreenCaptureKit, so the background is transparent. The output is an animated PNG, not a GIF: GIF has no soft edges and keeps old pixels where the panel shrinks. Check the frames on white before committing, for example `ffmpeg -f lavfi -i color=white:s=380x530 -i app/Resources/demo.png -filter_complex "[0][1]overlay=shortest=1,fps=1,tile=7x3" -frames:v 1 contact.png`.
+The helper finds controls by their accessibility labels, like "Launch Pixel 10" or "New emulator", not by position. If a label changes, update it there. The emulator has no device frame, because the frame's edges look rough at this size. It reads its window position and scale from `emulator-user.ini` and writes them back on exit, so the scripts set them right before each boot.
+
+The recording is a fixed 1280×960 point area around the menu bar icon, through ScreenCaptureKit. It shows only the wallpaper and the windows of AVDs, the emulator and scrcpy. Everything else is left out, the menu bar too. A second recording of the menu bar, from the app's icon to the clock, goes on top. Items of other apps between the icon and Apple's items get cut out, so the bar shows only AVDs and the standard items. The recording ends the way it starts, with everything stopped and the panel closed, so it loops. The emulator doesn't save its state when it stops in the recording (`saveSnapshotOnExit` in its `AVD.conf`), which would take about 12 seconds. The README gets an animated WebP, not an MP4: GitHub doesn't play videos from the repo inline. Check the frames before committing, for example `ffmpeg -i app/build/avds-demo.mp4 -vf "fps=1,scale=480:-1,tile=6x4" -frames:v 1 contact.png`.
 
 `AVDS_PREVIEW=1 app/build/AVDs.app/Contents/MacOS/AVDs` opens the panel in a normal window. That's easier to screenshot than the menu bar panel, which `screencapture -l <window id>` can also capture while it's open.
 
@@ -88,7 +90,7 @@ The icons use the Android robot, which needs the CC BY 3.0 credit line in the RE
 
 - Default branch is `develop`, remote `git@github.com:floschu/AVDs.git`.
 - When the app icon changes, render `app/Resources/readme-icon.png` again from the built app, for example with `NSWorkspace.shared.icon(forFile:)` at 1024 px, scaled to 512. Not in `build.sh`: every build would rewrite it and `release.sh` needs a clean tree.
-- `app/Resources/demo.png` goes through Git LFS (`.gitattributes`). Run `git lfs install --local` once in a fresh clone.
+- `app/Resources/demo.webp` goes through Git LFS (`.gitattributes`). Run `git lfs install --local` once in a fresh clone.
 - Don't commit, push or release unless the user asks.
 - Version name and code live in `app/Resources/Info.plist`. `scripts/release.sh` sets the name and bumps the code. Don't edit them by hand.
 - Version names are semver `MAJOR.MINOR.PATCH`, numbers only. Tags are `v<version name>`.
