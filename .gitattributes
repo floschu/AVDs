@@ -1,1 +1,2 @@
 app/Resources/demo.webp filter=lfs diff=lfs merge=lfs -text
+app/Resources/demo.mp4 filter=lfs diff=lfs merge=lfs -text

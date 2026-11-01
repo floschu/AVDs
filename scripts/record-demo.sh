@@ -1,6 +1,7 @@
 #!/bin/bash
 # Records the demo: app/Resources/demo.webp, the animation in the README, and
-# app/build/avds-demo.mp4, the same at full size for posts. AVDs launches a real emulator,
+# app/Resources/demo.mp4, the same at full size for X and other posts. Both come from one
+# recording, so they stay in sync. AVDs launches a real emulator,
 # mirrors a connected phone, opens the New Emulator screen, then stops both, so it loops.
 #
 # It runs in real mode. It creates a throwaway AVD "Pixel 10" (Pixel_10), boots it
@@ -24,7 +25,7 @@ SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
 AVD_DIR="$AVD_HOME/$AVD_ID.avd"
 LOG_DIR="$HOME/.android/$AVD_ID" # the android CLI puts the emulator log here
-MP4=app/build/avds-demo.mp4
+MP4=app/Resources/demo.mp4
 WEBP=app/Resources/demo.webp
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$SDK/platform-tools:$PATH"
 export ANDROID_HOME="$SDK"
@@ -133,10 +134,11 @@ ffmpeg -v error -y -i "$MAIN" -i "$BAR" -filter_complex \
   -c:v libx264 -preset slow -crf 16 -r 60 -movflags +faststart -an "$MP4"
 rm -f "$MAIN" "$BAR"
 
-# The README gets a smaller animated WebP. GitHub shows those inline, unlike MP4 files in the repo.
+# The README gets an animated WebP. GitHub shows those inline, unlike MP4 files in the repo.
+# It keeps the recorded size, 1x, so text stays sharp. About 4 MB at quality 88.
 FRAMES=app/build/demo-frames
 rm -rf "$FRAMES" && mkdir -p "$FRAMES"
-ffmpeg -v error -i "$MP4" -vf "fps=15,scale=960:-1:flags=lanczos" "$FRAMES/%05d.png"
-img2webp -loop 0 -lossy -q 70 -m 6 -d 67 "$FRAMES"/*.png -o "$WEBP" >/dev/null
+ffmpeg -v error -i "$MP4" -vf "fps=15,scale=$W:-1:flags=lanczos" "$FRAMES/%05d.png"
+img2webp -loop 0 -lossy -q 88 -m 4 -d 67 "$FRAMES"/*.png -o "$WEBP" >/dev/null
 rm -rf "$FRAMES"
 echo "wrote $MP4 ($(du -h "$MP4" | cut -f1 | tr -d ' ')) and $WEBP ($(du -h "$WEBP" | cut -f1 | tr -d ' '))"

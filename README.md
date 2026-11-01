@@ -22,7 +22,7 @@ macOS asks whether AVDs may find devices on your local network. That's adb looki
 ```
 scripts/build.sh            # builds app/build/AVDs.app
 scripts/build.sh --install  # also copies it to /Applications and restarts it
-scripts/record-demo.sh      # re-records the animation above, and an MP4 for posts, after UI changes
+scripts/record-demo.sh      # re-records the animation above and app/Resources/demo.mp4, after UI changes
 ```
 
 ## Release
