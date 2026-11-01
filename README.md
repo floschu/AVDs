@@ -38,10 +38,6 @@ scripts/release.sh 1.1.0
 The script bumps the version code, builds, commits, tags `v1.1.0`, pushes and creates the GitHub release with a DMG of the app.
 Your working tree has to be clean and `gh` logged in. `scripts/release.sh 1.1.0 --dry-run` only builds the DMG.
 
-## License
+## Author
 
-AVDs is licensed under the [Apache License 2.0](LICENSE).
-
-AVDs doesn't include scrcpy, the Android SDK or the `android` CLI. It runs the copies you installed, under their own terms: [scrcpy](https://github.com/Genymobile/scrcpy) is Apache 2.0, the SDK and CLI come with Google's Android SDK license agreement.
-
-The Android robot is reproduced or modified from work created and shared by Google and used according to terms described in the [Creative Commons 3.0 Attribution License](https://creativecommons.org/licenses/by/3.0/). Android is a trademark of Google LLC.
+Visit my [website](https://flosch.at/).
