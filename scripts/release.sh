@@ -5,7 +5,7 @@
 #
 # Sets the version name, bumps the version code (CFBundleVersion) by one, builds the app,
 # commits the version change, tags it v<version name>, pushes branch and tag, and creates a
-# GitHub release with a DMG of the app attached.
+# GitHub release with a DMG of the app attached. The release text explains how to install it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -62,5 +62,18 @@ git add "$PLIST"
 git commit -m "Release $NAME ($CODE)"
 git tag -a "$TAG" -m "AVDs $NAME"
 git push origin "$BRANCH" "$TAG"
-gh release create "$TAG" "$DMG" --title "AVDs $NAME" --generate-notes
+# Install steps first, then GitHub's generated list of changes.
+REPO_URL=$(gh repo view --json url -q .url)
+DMG_NAME=$(basename "$DMG")
+NOTES=app/build/release-notes.md
+cat > "$NOTES" <<EOF
+## Install
+
+1. Download [$DMG_NAME]($REPO_URL/releases/download/$TAG/$DMG_NAME) and open it.
+2. Drag AVDs onto Applications.
+3. The app isn't signed or notarized, so macOS blocks it on the first launch with "Apple could not verify AVDs". Open System Settings, Privacy & Security, scroll down and click Open Anyway. Or run this once in Terminal: \`xattr -dr com.apple.quarantine /Applications/AVDs.app\`
+
+AVDs needs macOS 26 on Apple silicon, the [\`android\` CLI](https://developer.android.com/tools/agents/android-cli) and the Android SDK. To mirror devices, install [scrcpy](https://github.com/Genymobile/scrcpy) with \`brew install scrcpy\`. See the [README]($REPO_URL#readme) for more.
+EOF
+gh release create "$TAG" "$DMG" --title "AVDs $NAME" --notes-file "$NOTES" --generate-notes
 echo "released $TAG"
