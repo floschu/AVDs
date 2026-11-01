@@ -11,7 +11,7 @@
 
 1. Download `AVDs-<version>.dmg` from the [latest release](https://github.com/floschu/AVDs/releases/latest) and open it.
 2. Drag AVDs onto Applications.
-3. The app isn't notarized. On the first launch, right-click it in Applications and choose Open.
+3. The app isn't signed or notarized, so macOS blocks it on the first launch with "Apple could not verify AVDs". Open System Settings, Privacy & Security, scroll down and click Open Anyway. Or run this once in Terminal: `xattr -dr com.apple.quarantine /Applications/AVDs.app`
 
 AVDs lives in the menu bar. Click its icon to open the panel. Right-click the icon for Refresh, Open at Login, Report an Issue and Quit. On its first launch from Applications, AVDs adds itself to your login items. Turn that off with Open at Login in the same menu.
 
