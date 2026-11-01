@@ -8,6 +8,14 @@ enum RowMenuItem {
     case divider
     /// A disabled line that explains why other items are disabled.
     case note(String)
+
+    /// Copies the adb serial, like `emulator-5554`, for `adb -s`.
+    static func copySerial(_ serial: String) -> RowMenuItem {
+        .action("Copy Serial (\(serial))", systemImage: "doc.on.doc") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(serial, forType: .string)
+        }
+    }
 }
 
 /// The items as SwiftUI menu content, for a `Menu`.

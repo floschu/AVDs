@@ -332,6 +332,9 @@ struct MenuView: View {
                 model.show(avd)
             })
         }
+        if let serial = avd.serial, avd.isRunning {
+            items.append(.copySerial(serial))
+        }
         if !items.isEmpty { items.append(.divider) }
         let idle = !avd.isRunning && activity == nil
         items += [
@@ -405,11 +408,12 @@ struct MenuView: View {
             menuPlaceholder
         }
         .rowMenu {
-            mirroring
+            (mirroring
                 ? [.action("Stop Mirroring", systemImage: "stop.fill") { model.stopMirroring(device) },
                    .action("Show Window", systemImage: "macwindow") { model.showMirror(device) }]
                 : [.action("Mirror", systemImage: "rectangle.on.rectangle",
-                           enabled: device.isReady && model.hasScrcpy) { model.mirror(device) }]
+                           enabled: device.isReady && model.hasScrcpy) { model.mirror(device) }])
+                + [.divider, .copySerial(device.id)]
         }
     }
 
