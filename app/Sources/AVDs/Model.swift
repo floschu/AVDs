@@ -163,21 +163,25 @@ final class Model {
             demoMirrors.insert(device.id)
             return
         }
+        startMirror(serial: device.id, name: device.model)
+    }
+
+    /// Starts scrcpy for a serial, a real device or a headless emulator.
+    private func startMirror(serial: String, name: String) {
+        guard !Demo.isOn else { return }
         guard let scrcpy = Tools.scrcpy else {
             error = "scrcpy isn't installed. Run: brew install scrcpy"
             return
         }
-        guard mirrors[device.id] == nil else { return }
+        guard mirrors[serial] == nil else { return }
         let process = Process()
         process.executableURL = scrcpy
-        process.arguments = ["-s", device.id, "--window-title", device.model, "--stay-awake"]
+        process.arguments = ["-s", serial, "--window-title", name, "--stay-awake"]
         process.environment = Tools.environment
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
         process.standardInput = FileHandle.nullDevice
-        let serial = device.id
-        let name = device.model
         let collector = OutputCollector()
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
@@ -253,9 +257,15 @@ final class Model {
 
     // MARK: Windows
 
-    /// Brings the emulator's window to the front.
+    /// Brings the emulator's window to the front. A headless emulator has no window,
+    /// so it gets a scrcpy window instead.
     func show(_ avd: AVD) {
-        if let pid = avd.pid { activate(pid) }
+        if avd.headless, let serial = avd.serial {
+            if let pid = mirrors[serial]?.processIdentifier { activate(pid) }
+            else { startMirror(serial: serial, name: avd.displayName) }
+        } else if let pid = avd.pid {
+            activate(pid)
+        }
     }
 
     /// Brings the scrcpy window to the front.
@@ -263,7 +273,10 @@ final class Model {
         if let pid = mirrors[device.id]?.processIdentifier { activate(pid) }
     }
 
-    func canShow(_ avd: AVD) -> Bool { avd.pid != nil || (Demo.isOn && avd.isRunning) }
+    func canShow(_ avd: AVD) -> Bool {
+        if avd.headless { return avd.isOnline && hasScrcpy }
+        return avd.pid != nil || (Demo.isOn && avd.isRunning)
+    }
 
     private func activate(_ pid: Int32) {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }

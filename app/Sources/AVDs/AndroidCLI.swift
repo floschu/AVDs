@@ -41,6 +41,9 @@ struct AVD: Identifiable, Hashable {
     /// The emulator process, from the process list. The CLI's status flips between Online and
     /// Offline while an emulator boots, so this decides whether it runs.
     var pid: Int32?
+    /// Started with `-no-window`, for example by a script or an agent. It has no window to show,
+    /// so Show Window mirrors it with scrcpy instead.
+    var headless = false
     /// Demo mode has no processes, so its sample emulators set this instead.
     var demoRunning = false
 
@@ -125,23 +128,26 @@ enum AndroidCLI {
                     kind: DeviceKind(tag: tag, device: device, name: id),
                     variant: config["tag.displaynames"]?.split(separator: ",").first.map(String.init)
                 )
-                avd.pid = running[id]
+                avd.pid = running[id]?.pid
+                avd.headless = running[id]?.headless ?? false
                 return avd
             }
     }
 
-    /// Process IDs of running emulators by AVD name, from `qemu-system-* @name` or `-avd name`.
-    private static func runningAVDs() async -> [String: Int32] {
+    /// Running emulators by AVD name, from `qemu-system-* @name` or `-avd name`: the process ID
+    /// and whether it runs without a window (`-no-window` or the `-headless` binary).
+    private static func runningAVDs() async -> [String: (pid: Int32, headless: Bool)] {
         guard let output = try? await Shell.run(URL(fileURLWithPath: "/bin/ps"), ["-axo", "pid,command"],
                                                 timeout: .seconds(5)) else { return [:] }
-        var running: [String: Int32] = [:]
+        var running: [String: (pid: Int32, headless: Bool)] = [:]
         for line in output.split(separator: "\n") where line.contains("qemu-system") {
             let args = line.split(separator: " ").map(String.init)
             guard let pid = args.first.flatMap({ Int32($0) }) else { continue }
+            let headless = args.contains("-no-window") || line.contains("-headless ")
             if let at = args.first(where: { $0.hasPrefix("@") }) {
-                running[String(at.dropFirst())] = pid
+                running[String(at.dropFirst())] = (pid, headless)
             } else if let i = args.firstIndex(of: "-avd"), i + 1 < args.count {
-                running[args[i + 1]] = pid
+                running[args[i + 1]] = (pid, headless)
             }
         }
         return running

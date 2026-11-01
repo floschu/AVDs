@@ -244,7 +244,7 @@ struct MenuView: View {
                     ?? (avd.isOnline ? avd.serial.map { "\(avd.apiLabel) · \($0)" } : avd.isRunning ? "Booting…" : nil),
             warning: confirm != nil,
             open: showable ? { model.show(avd) } : nil,
-            openHint: "Show the emulator window"
+            openHint: avd.headless ? "Mirror the emulator with scrcpy, it runs without a window" : "Show the emulator window"
         ) {
             if let confirm {
                 Button("Cancel") {
@@ -332,6 +332,11 @@ struct MenuView: View {
             items.append(.action("Show Window", systemImage: "macwindow", enabled: model.canShow(avd)) {
                 model.show(avd)
             })
+            if avd.headless && !model.canShow(avd) {
+                items.append(.note(model.hasScrcpy
+                    ? "Runs without a window. It can be mirrored once it has booted."
+                    : "Runs without a window. Install scrcpy to mirror it."))
+            }
         }
         if let serial = avd.serial, avd.isRunning {
             items.append(.copySerial(serial))
