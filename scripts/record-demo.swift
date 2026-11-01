@@ -90,8 +90,8 @@ let avdFolder = URL(fileURLWithPath: args[4])
 let avdName = args[5]
 let emulatorSize = CGSize(width: emulatorWidth, height: emulatorHeight)
 
-/// The recorded area in points, 4:3.
-let area = CGSize(width: 1280, height: 960)
+/// The recorded area in points, 16:10. Wide enough for scrcpy, the emulator and the panel.
+let area = CGSize(width: 1600, height: 1000)
 let gap = 40.0
 
 // MARK: Accessibility
@@ -237,7 +237,8 @@ final class Finished: NSObject, SCRecordingOutputDelegate, @unchecked Sendable {
     var isDone: Bool { lock.withLock { done } }
     func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) { lock.withLock { done = true } }
     func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: any Error) {
-        fail("recording failed: \(error.localizedDescription)")
+        fputs("note: a recording output stopped: \(error.localizedDescription)\n", stderr)
+        lock.withLock { done = true }
     }
 }
 
@@ -265,7 +266,8 @@ final class Finished: NSObject, SCRecordingOutputDelegate, @unchecked Sendable {
     return SCContentFilter(display: display, excludingWindows: [])
 }
 
-@Sendable func record(_ rect: CGRect, filter: SCContentFilter, to url: URL, delegate: Finished) async throws -> SCStream {
+@Sendable func record(_ rect: CGRect, filter: SCContentFilter, to url: URL, delegate: Finished,
+                      streamDelegate: SCStreamDelegate) async throws -> SCStream {
     try? FileManager.default.removeItem(at: url)
     let config = SCStreamConfiguration()
     let scale = Double(filter.pointPixelScale)
@@ -275,7 +277,7 @@ final class Finished: NSObject, SCRecordingOutputDelegate, @unchecked Sendable {
     config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
     config.showsCursor = true
     config.queueDepth = 8
-    let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+    let stream = SCStream(filter: filter, configuration: config, delegate: streamDelegate)
     let recordingConfig = SCRecordingOutputConfiguration()
     recordingConfig.outputURL = url
     recordingConfig.outputFileType = .mov
@@ -298,7 +300,7 @@ closePanel()
 // The area hangs from the top of the screen, with the panel near its right edge. Near the right
 // edge of the screen it goes all the way, so the clock shows in full.
 let screen = CGDisplayBounds(CGMainDisplayID())
-let areaRight = screen.maxX - panel.maxX < 240 ? screen.maxX : panel.maxX + 60
+let areaRight = screen.maxX - panel.maxX < 400 ? screen.maxX : panel.maxX + 60
 let areaX = max(screen.minX, areaRight - area.width)
 let rect = CGRect(x: areaX, y: screen.minY, width: area.width, height: area.height)
 let item = statusItemFrame()
@@ -311,7 +313,7 @@ func appleItems() -> [CGRect] {
         let element = AXUIElementCreateApplication(app.processIdentifier)
         guard let bar: AXUIElement = attribute(element, "AXExtrasMenuBar"),
               let items: [AXUIElement] = attribute(bar, kAXChildrenAttribute) else { continue }
-        frames += items.compactMap { frame($0) }.filter { $0.minX > item.maxX }
+        frames += items.compactMap { frame($0) }.filter { $0.minX > item.maxX - 6 } // neighbours overlap a little
     }
     return frames
 }
@@ -351,17 +353,67 @@ func placeMirror(pid mirrorPID: pid_t) {
 let restingSpot = CGPoint(x: rect.midX - 160, y: rect.midY + 120)
 move(to: restingSpot, duration: 0.6)
 var shown: Set<pid_t> = [pid]
-let barDone = Finished()
-let mainDone = Finished()
-let barStream = run { try await record(barRect, filter: try await fullFilter(), to: barOutput, delegate: barDone) }
-let mainStream = run { [shown] in
-    try await record(rect, filter: try await mainFilter(pids: shown), to: mainOutput, delegate: mainDone)
+
+/// The two streams, main area and menu bar, recorded into numbered files like demo-main.0.mov.
+/// macOS sometimes stops both at once with "Unknown stream error", for example when the app's
+/// menu bar icon changes right next to Apple's items as the emulator quits. Then a new pair
+/// starts right away, and record-demo.sh joins the files.
+final class Recording: NSObject, SCStreamDelegate, @unchecked Sendable {
+    private(set) var segment = -1
+    private(set) var main: SCStream?
+    private(set) var bar: SCStream?
+    private(set) var mainDone = Finished()
+    private(set) var barDone = Finished()
+
+    func file(_ url: URL, _ n: Int) -> URL {
+        url.deletingPathExtension().appendingPathExtension("\(n).mov")
+    }
+
+    func start() {
+        segment += 1
+        let n = segment
+        mainDone = Finished()
+        barDone = Finished()
+        let (mainDone, barDone) = (self.mainDone, self.barDone)
+        bar = run { try await record(barRect, filter: try await fullFilter(), to: self.file(barOutput, n),
+                                     delegate: barDone, streamDelegate: self) }
+        main = run { [shown] in
+            try await record(rect, filter: try await mainFilter(pids: shown), to: self.file(mainOutput, n),
+                             delegate: mainDone, streamDelegate: self)
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: any Error) {
+        DispatchQueue.main.async {
+            // Both streams of a pair report it. Restart once.
+            guard stream === self.main || stream === self.bar else { return }
+            fputs("note: the recording stopped (\(error.localizedDescription)), starting a new part\n", stderr)
+            let other = stream === self.main ? self.bar : self.main
+            self.main = nil
+            self.bar = nil
+            if let other { Task { try? await other.stopCapture() } }
+            self.start()
+        }
+    }
+
+    func stop() {
+        guard let main, let bar else { return }
+        self.main = nil
+        self.bar = nil
+        run { try? await main.stopCapture() }
+        run { try? await bar.stopCapture() }
+        let (mainDone, barDone) = (self.mainDone, self.barDone)
+        guard waitFor(10, { mainDone.isDone && barDone.isDone ? true : nil }) != nil else { fail("the recording didn't finish") }
+    }
 }
+let recording = Recording()
+recording.start()
 
 /// Adds a process's windows to the main recording.
 func show(_ newPID: pid_t) {
     shown.insert(newPID)
-    run { [shown] in try await mainStream.updateContentFilter(try await mainFilter(pids: shown)) }
+    guard let main = recording.main else { return }
+    run { [shown] in try await main.updateContentFilter(try await mainFilter(pids: shown)) }
 }
 
 wait(0.8)
@@ -424,9 +476,8 @@ closePanel()
 move(to: restingSpot, duration: 0.8)
 wait(0.8)
 
-run { try await mainStream.stopCapture() }
-run { try await barStream.stopCapture() }
-guard waitFor(10, { mainDone.isDone && barDone.isDone ? true : nil }) != nil else { fail("the recording didn't finish") }
+recording.stop()
+print("PARTS \(recording.segment + 1)")
 if let mirrorPID { kill(mirrorPID, SIGTERM) }
 print("AREA \(Int(rect.minX)) \(Int(rect.minY)) \(Int(rect.width)) \(Int(rect.height))")
 print("BAR \(Int(barRect.minX - rect.minX)) \(Int(barRect.minY - rect.minY))")

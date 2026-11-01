@@ -43,16 +43,12 @@ IMAGE=$(cd "$SDK" && ls -d system-images/*/*/arm64-v8a 2>/dev/null \
   | sort -t$'\t' -k2,2V -k1,1n | tail -1 | cut -f3 | tr / ';')
 [ -n "$IMAGE" ] || { echo "error: no phone system image installed. Install one in AVDs first." >&2; exit 1; }
 
-scripts/build.sh
 swiftc -O -o app/build/record-demo scripts/record-demo.swift
 
 running() { pgrep -f "qemu-system.*@$AVD_ID" >/dev/null; }
 serial() { android emulator list --long 2>/dev/null | awk -v id="$AVD_ID" '$1 == id { print $NF }' | grep emulator- || true; }
 
-USER_APP=""
-APP_PID=""
 cleanup() {
-  [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null || true
   if running; then
     local s
     s=$(serial)
@@ -63,10 +59,6 @@ cleanup() {
     android emulator remove "$AVD_ID" >/dev/null 2>&1 || "$AVDMANAGER" delete avd -n "$AVD_ID" >/dev/null 2>&1 || true
   fi
   [ -z "$KEEP_LOG" ] && rm -rf "$LOG_DIR"
-  if [ -n "$USER_APP" ]; then
-    [ -n "$APP_PID" ] && while kill -0 "$APP_PID" 2>/dev/null; do sleep 0.1; done
-    open "$USER_APP"
-  fi
 }
 trap cleanup EXIT
 
@@ -96,15 +88,14 @@ printf 'window.scale = %s\n' "$SCALE" >> "$AVD_DIR/emulator-user.ini"
 # 1 is Never. The snapshot from the boot above stays.
 printf '[perAvd]\nset\\saveSnapshotOnExit=1\n' > "$AVD_DIR/AVD.conf"
 
-# Swap the running AVDs, if any, for the fresh build. Put it back at the end.
-if PID=$(pgrep -x AVDs); then
-  USER_APP=$(ps -o comm= -p "$PID" | sed 's|/Contents/MacOS/AVDs$||')
-  osascript -e 'quit app "AVDs"'
-  while pgrep -x AVDs >/dev/null; do sleep 0.1; done
+# Record with the AVDs that runs now, so its menu bar icon stays where you put it. Another copy,
+# like app/build/AVDs.app, gets a menu bar position of its own. To record a new build, install
+# it first with scripts/build.sh --install.
+if ! APP_PID=$(pgrep -x AVDs); then
+  open /Applications/AVDs.app
+  sleep 4
+  APP_PID=$(pgrep -x AVDs) || { echo "error: AVDs doesn't run" >&2; exit 1; }
 fi
-app/build/AVDs.app/Contents/MacOS/AVDs >/dev/null 2>&1 &
-APP_PID=$!
-sleep 4
 
 MAIN=app/build/demo-main.mov
 BAR=app/build/demo-bar.mov
@@ -112,7 +103,20 @@ RESULT=$(app/build/record-demo "$APP_PID" "$MAIN" "$BAR" "$AVD_DIR" "$AVD_NAME" 
 read -r _ _ W H <<< "$(echo "$RESULT" | sed -n 's/^AREA //p')"
 read -r BX BY <<< "$(echo "$RESULT" | sed -n 's/^BAR //p')"
 read -r FROM TO <<< "$(echo "$RESULT" | sed -n 's/^HIDE //p')"
-[ -n "$H" ] && [ -n "$BY" ] && [ -n "$TO" ] && [ -s "$MAIN" ] && [ -s "$BAR" ] || { echo "error: the recording failed" >&2; exit 1; }
+PARTS=$(echo "$RESULT" | sed -n 's/^PARTS //p')
+[ -n "$H" ] && [ -n "$BY" ] && [ -n "$TO" ] && [ -n "$PARTS" ] || { echo "error: the recording failed" >&2; exit 1; }
+# The helper records into numbered parts, demo-main.0.mov and so on. It starts a new part when
+# macOS stops a recording. Join them.
+join() {
+  local out=$1 list=app/build/parts.txt
+  : > "$list"
+  for ((i = 0; i < PARTS; i++)); do echo "file '$PWD/${out%.mov}.$i.mov'" >> "$list"; done
+  ffmpeg -v error -y -f concat -safe 0 -i "$list" -c copy "$out"
+  rm -f "$list" "${out%.mov}".*.mov
+}
+join "$MAIN"
+join "$BAR"
+[ -s "$MAIN" ] && [ -s "$BAR" ] || { echo "error: the recording failed" >&2; exit 1; }
 
 # The main recording leaves out the menu bar. Lay the recorded menu bar over it, without the
 # items of other apps between the app's icon and Apple's items. The numbers are in points, the
@@ -128,17 +132,17 @@ if [ "$TO" -gt "$FROM" ]; then
 else
   BAR_FILTER="[0][1]overlay=$(even "$BX"):$(even "$BY"):eof_action=repeat"
 fi
-# Then scale 1.5x with Lanczos, so the 1x capture holds up against the compression of social sites.
+# Then scale to 1920 wide, 1.2x, with Lanczos. 1920x1200 is the largest X takes.
 ffmpeg -v error -y -i "$MAIN" -i "$BAR" -filter_complex \
-  "$BAR_FILTER,scale=$((W * 3 / 2)):$((H * 3 / 2)):flags=lanczos,format=yuv420p" \
+  "$BAR_FILTER,scale=1920:-2:flags=lanczos,format=yuv420p" \
   -c:v libx264 -preset slow -crf 16 -r 60 -movflags +faststart -an "$MP4"
 rm -f "$MAIN" "$BAR"
 
 # The README gets an animated WebP. GitHub shows those inline, unlike MP4 files in the repo.
-# It keeps the recorded size, 1x, so text stays sharp. About 4 MB at quality 88.
+# 1280 wide, shown at 640 in the README, so it stays sharp on Retina screens.
 FRAMES=app/build/demo-frames
 rm -rf "$FRAMES" && mkdir -p "$FRAMES"
-ffmpeg -v error -i "$MP4" -vf "fps=15,scale=$W:-1:flags=lanczos" "$FRAMES/%05d.png"
+ffmpeg -v error -i "$MP4" -vf "fps=15,scale=1280:-1:flags=lanczos" "$FRAMES/%05d.png"
 img2webp -loop 0 -lossy -q 88 -m 4 -d 67 "$FRAMES"/*.png -o "$WEBP" >/dev/null
 rm -rf "$FRAMES"
 echo "wrote $MP4 ($(du -h "$MP4" | cut -f1 | tr -d ' ')) and $WEBP ($(du -h "$WEBP" | cut -f1 | tr -d ' '))"
